@@ -41,31 +41,63 @@ app.post("/daily-log", express.json(), function (req, res) {
   res.json(log);
 });
 app.post("/daily-log-db", express.json(), async function (req, res) {
+  // Borrow one dedicated connection from the pool, so every query
+  // below runs inside the same transaction.
+  const client = await pool.connect();
+
   try {
     const { date, baniNames } = req.body;
 
-    const logResult = await pool.query(
-      "INSERT INTO daily_logs (date) VALUES ($1) RETURNING id",
+    await client.query("BEGIN");
+
+    // Step 1: find today's log, or create it if it doesn't exist yet.
+    // ORDER BY id DESC LIMIT 1 picks the newest row, which keeps this
+    // safe even while old duplicate rows are still in the table.
+    const existing = await client.query(
+      "SELECT id FROM daily_logs WHERE date = $1 ORDER BY id DESC LIMIT 1",
       [date]
     );
-    const logId = logResult.rows[0].id;
+
+    let logId;
+    if (existing.rows.length === 0) {
+      const inserted = await client.query(
+        "INSERT INTO daily_logs (date) VALUES ($1) RETURNING id",
+        [date]
+      );
+      logId = inserted.rows[0].id;
+    } else {
+      logId = existing.rows[0].id;
+    }
+
+    // Step 2: replace this log's banis with exactly what's checked now.
+    await client.query(
+      "DELETE FROM completed_banis WHERE daily_log_id = $1",
+      [logId]
+    );
 
     for (const name of baniNames) {
-      const baniResult = await pool.query(
+      const baniResult = await client.query(
         "SELECT id FROM banis WHERE name = $1",
         [name]
       );
       const baniId = baniResult.rows[0].id;
 
-      await pool.query(
+      await client.query(
         "INSERT INTO completed_banis (daily_log_id, bani_id) VALUES ($1, $2)",
         [logId, baniId]
       );
     }
 
+    await client.query("COMMIT");
+
     res.json({ success: true, logId: logId });
   } catch (err) {
+    // Something failed partway through: undo everything from this save.
+    await client.query("ROLLBACK");
     res.json({ success: false, error: err.message });
+  } finally {
+    // Always hand the connection back to the pool, success or failure.
+    client.release();
   }
 });
 
