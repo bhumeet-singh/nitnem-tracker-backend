@@ -171,3 +171,20 @@ app.get("/test-db", async function (req, res) {
     res.json({ success: false, error: err.message });
   }
 });
+
+app.get("/history", async function (req, res) {
+  try {
+    const result = await pool.query(`
+      SELECT daily_logs.date, STRING_AGG(banis.name, ', ' ORDER BY banis.id) AS completed
+      FROM daily_logs
+      LEFT JOIN completed_banis ON completed_banis.daily_log_id = daily_logs.id
+      LEFT JOIN banis ON banis.id = completed_banis.bani_id
+      GROUP BY daily_logs.date
+      ORDER BY daily_logs.date DESC
+    `);
+
+    res.json(result.rows);
+  } catch (err) {
+    res.json({ success: false, error: err.message });
+  }
+});
